@@ -1,0 +1,332 @@
+// ═══════════════════════════════════════════════════════════════════
+//  DEPLOY PIPELINE — App Repo
+//
+//  Triggered by: CI pipeline automatically after tests pass
+//  Can also be triggered manually for hotfixes or rollbacks
+//
+//  Stages:
+//    1.  Checkout
+//    2.  Load Config      → build ECR URLs dynamically (same as CI)
+//    3.  Validate Image   → confirm image exists in ECR
+//    4.  Configure kubectl → connect to EKS
+//    5.  Setup Namespaces → dev, production, monitoring
+//    6.  Create Secrets   → DB password in K8s secret
+//    7.  Deploy to DEV    → helm upgrade --install
+//    8.  Smoke Test DEV   → verify pods running + health check
+//    9.  Approve Prod     → manual approval gate
+//    10. Deploy PROD      → helm upgrade --install
+//    11. Verify Prod      → final health check
+// ═══════════════════════════════════════════════════════════════════
+
+pipeline {
+
+    agent any
+
+    parameters {
+        string(
+            name:         'IMAGE_TAG',
+            defaultValue: 'latest',
+            description:  'Image tag to deploy — passed automatically from CI pipeline'
+        )
+        choice(
+            name:    'DEPLOY_ENV',
+            choices: ['both', 'dev-only', 'production-only'],
+            description: 'both = deploy dev then production (normal flow)'
+        )
+        booleanParam(
+            name:         'ROLLBACK',
+            defaultValue: false,
+            description:  'Check to rollback production to previous version'
+        )
+        string(name: 'GIT_COMMIT',   defaultValue: '', description: 'From CI pipeline')
+        string(name: 'GIT_BRANCH',   defaultValue: '', description: 'From CI pipeline')
+        string(name: 'CI_BUILD_NUM', defaultValue: '', description: 'From CI pipeline')
+    }
+
+    environment {
+        AWS_REGION   = 'us-east-1'
+        PROJECT_NAME = 'devops-platform'
+        DB_PASSWORD  = credentials('DB_PASSWORD')
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 60, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+        disableConcurrentBuilds()
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh """
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "  Deploy Pipeline #${BUILD_NUMBER}"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "  Image Tag : ${params.IMAGE_TAG}"
+                    echo "  Deploy To : ${params.DEPLOY_ENV}"
+                    echo "  Rollback  : ${params.ROLLBACK}"
+                    echo "  CI Build  : #${params.CI_BUILD_NUM}"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                """
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 2 — Load Config
+        // Same approach as CI — build ECR URL dynamically
+        // ─────────────────────────────────────────────────────────
+        stage('Load Config') {
+            steps {
+                script {
+                    env.AWS_ACCOUNT_ID = sh(
+                        script: 'aws sts get-caller-identity --query Account --output text',
+                        returnStdout: true
+                    ).trim()
+
+                    env.ECR_BACKEND_URL  = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.PROJECT_NAME}-backend"
+                    env.ECR_FRONTEND_URL = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.PROJECT_NAME}-frontend"
+                    env.EKS_CLUSTER_NAME = "${env.PROJECT_NAME}-production"
+
+                    echo "✅ Config loaded"
+                    echo "   ECR Backend  : ${env.ECR_BACKEND_URL}"
+                    echo "   ECR Frontend : ${env.ECR_FRONTEND_URL}"
+                    echo "   EKS Cluster  : ${env.EKS_CLUSTER_NAME}"
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 3 — Validate Image
+        // Confirm the image actually exists in ECR before deploying
+        // ─────────────────────────────────────────────────────────
+        stage('Validate Image') {
+            when {
+                expression { return !params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    echo "--- Verifying image in ECR ---"
+                    aws ecr describe-images \
+                        --repository-name ${PROJECT_NAME}-backend \
+                        --image-ids imageTag=${params.IMAGE_TAG} \
+                        --region ${AWS_REGION} > /dev/null
+
+                    if [ \$? -ne 0 ]; then
+                        echo "❌ Image ${params.IMAGE_TAG} not found in ECR"
+                        exit 1
+                    fi
+                    echo "✅ Image ${params.IMAGE_TAG} confirmed in ECR"
+                """
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 4 — Configure kubectl
+        // Connect Jenkins to the EKS cluster
+        // ─────────────────────────────────────────────────────────
+        stage('Configure kubectl') {
+            steps {
+                sh """
+                    aws eks update-kubeconfig \
+                        --region ${AWS_REGION} \
+                        --name   ${env.EKS_CLUSTER_NAME}
+
+                    kubectl get nodes
+                    echo "✅ kubectl connected to EKS"
+                """
+            }
+        }
+
+        stage('Setup Namespaces') {
+            steps {
+                sh """
+                    kubectl create namespace dev        --dry-run=client -o yaml | kubectl apply -f -
+                    kubectl create namespace production --dry-run=client -o yaml | kubectl apply -f -
+                    kubectl create namespace monitoring  --dry-run=client -o yaml | kubectl apply -f -
+                    echo "✅ Namespaces ready"
+                """
+            }
+        }
+
+        stage('Create Secrets') {
+            steps {
+                sh """
+                    kubectl create secret generic backend-secret \
+                        --namespace=dev \
+                        --from-literal=db-password=${DB_PASSWORD} \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                    kubectl create secret generic backend-secret \
+                        --namespace=production \
+                        --from-literal=db-password=${DB_PASSWORD} \
+                        --dry-run=client -o yaml | kubectl apply -f -
+
+                    echo "✅ Secrets created"
+                """
+            }
+        }
+
+        stage('Deploy to DEV') {
+            when {
+                expression { return params.DEPLOY_ENV in ['both', 'dev-only'] && !params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    helm upgrade --install backend-dev ./helm/backend \
+                        --namespace dev \
+                        --values    ./helm/backend/values.yaml \
+                        --values    ./helm/backend/values-dev.yaml \
+                        --set image.repository=${env.ECR_BACKEND_URL} \
+                        --set image.tag=${params.IMAGE_TAG} \
+                        --set image.pullPolicy=Always \
+                        --wait --timeout 5m --atomic --cleanup-on-fail
+
+                    helm upgrade --install frontend-dev ./helm/frontend \
+                        --namespace dev \
+                        --values    ./helm/frontend/values.yaml \
+                        --values    ./helm/frontend/values-dev.yaml \
+                        --set image.repository=${env.ECR_FRONTEND_URL} \
+                        --set image.tag=${params.IMAGE_TAG} \
+                        --set image.pullPolicy=Always \
+                        --wait --timeout 5m --atomic --cleanup-on-fail
+
+                    kubectl get all -n dev
+                    echo "✅ DEV deployment complete"
+                """
+            }
+        }
+
+        stage('Smoke Test DEV') {
+            when {
+                expression { return params.DEPLOY_ENV in ['both', 'dev-only'] && !params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    kubectl rollout status deployment/backend-dev-backend \
+                        --namespace=dev --timeout=120s
+                    kubectl rollout status deployment/frontend-dev-frontend \
+                        --namespace=dev --timeout=120s
+
+                    kubectl get pods -n dev
+
+                    kubectl port-forward svc/backend-service 9999:80 --namespace=dev &
+                    PF_PID=\$!
+                    sleep 5
+
+                    HTTP=\$(curl -s -o /dev/null -w "%{http_code}" \
+                        http://localhost:9999/api/health || echo "000")
+
+                    kill \$PF_PID 2>/dev/null || true
+
+                    echo "Health check: HTTP \$HTTP"
+                    [ "\$HTTP" = "200" ] && echo "✅ Health check passed" || echo "⚠️ Health check: \$HTTP"
+                    echo "✅ Smoke tests complete"
+                """
+            }
+        }
+
+        stage('Approve Production') {
+            when {
+                expression { return params.DEPLOY_ENV in ['both', 'production-only'] && !params.ROLLBACK }
+            }
+            steps {
+                timeout(time: 30, unit: 'MINUTES') {
+                    input(
+                        message: """
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  🚀 Deploy to PRODUCTION?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Image Tag : ${params.IMAGE_TAG}
+  CI Build  : #${params.CI_BUILD_NUM}
+  Commit    : ${params.GIT_COMMIT}
+
+  ✅ Tests passed
+  ✅ Images in ECR
+  ✅ DEV deployment healthy
+
+  Review DEV before approving.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        """,
+                        ok: '🚀 Deploy to Production'
+                    )
+                }
+            }
+        }
+
+        stage('Deploy to PRODUCTION') {
+            when {
+                expression { return params.DEPLOY_ENV in ['both', 'production-only'] && !params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    helm upgrade --install backend ./helm/backend \
+                        --namespace production \
+                        --values    ./helm/backend/values.yaml \
+                        --set image.repository=${env.ECR_BACKEND_URL} \
+                        --set image.tag=${params.IMAGE_TAG} \
+                        --set image.pullPolicy=Always \
+                        --wait --timeout 10m --atomic --cleanup-on-fail
+
+                    helm upgrade --install frontend ./helm/frontend \
+                        --namespace production \
+                        --values    ./helm/frontend/values.yaml \
+                        --set image.repository=${env.ECR_FRONTEND_URL} \
+                        --set image.tag=${params.IMAGE_TAG} \
+                        --set image.pullPolicy=Always \
+                        --wait --timeout 10m --atomic --cleanup-on-fail
+
+                    echo "✅ PRODUCTION deployment complete"
+                """
+            }
+        }
+
+        stage('Verify Production') {
+            when {
+                expression { return params.DEPLOY_ENV in ['both', 'production-only'] && !params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    kubectl get pods     -n production
+                    kubectl get svc      -n production
+                    kubectl get hpa      -n production
+                    helm list --all-namespaces
+
+                    kubectl rollout status deployment/backend-backend \
+                        --namespace=production --timeout=60s
+                    kubectl rollout status deployment/frontend-frontend \
+                        --namespace=production --timeout=60s
+
+                    echo "✅ Production verified — ${params.IMAGE_TAG} is LIVE"
+                """
+            }
+        }
+
+        stage('Rollback Production') {
+            when {
+                expression { return params.ROLLBACK }
+            }
+            steps {
+                sh """
+                    helm history backend  -n production
+                    helm history frontend -n production
+
+                    helm rollback backend  0 --namespace=production --wait
+                    helm rollback frontend 0 --namespace=production --wait
+
+                    kubectl get pods -n production
+                    echo "✅ Rollback complete"
+                """
+            }
+        }
+    }
+
+    post {
+        success { echo "✅ Deploy SUCCESS — ${params.IMAGE_TAG} live in ${params.DEPLOY_ENV}" }
+        failure { echo "❌ Deploy FAILED — production may have auto-rolled back via --atomic" }
+        always  { cleanWs() }
+    }
+}

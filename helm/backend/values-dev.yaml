@@ -1,0 +1,16 @@
+replicaCount: 1
+autoscaling:
+  enabled: false
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 256Mi
+env:
+  ENV: development
+  APP_VERSION: "dev"
+  DB_NAME: taskdb
+  DB_USER: taskuser
+  DB_PORT: "5432"

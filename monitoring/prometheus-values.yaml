@@ -1,0 +1,14 @@
+fullnameOverride: monitoring
+prometheus:
+  prometheusSpec:
+    retention: 15d
+grafana:
+  enabled: true
+  adminPassword: "DevOpsAdmin123"
+  persistence:
+    enabled: true
+    size: 5Gi
+alertmanager:
+  enabled: true
+nodeExporter:
+  enabled: true

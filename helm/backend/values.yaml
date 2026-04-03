@@ -1,0 +1,42 @@
+replicaCount: 2
+
+image:
+  repository: ""
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 5000
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+env:
+  ENV: production
+  APP_VERSION: "1.0.0"
+  DB_NAME: taskdb
+  DB_USER: taskuser
+  DB_PORT: "5432"
+
+probes:
+  liveness:
+    path: /api/health
+    initialDelaySeconds: 30
+    periodSeconds: 10
+  readiness:
+    path: /api/ready
+    initialDelaySeconds: 5
+    periodSeconds: 5

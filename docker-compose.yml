@@ -1,0 +1,98 @@
+version: "3.9"
+
+# ═══════════════════════════════════════════════════════════════════
+#  Local Development — 3 Tier Application
+#
+#  TIER 1: frontend  → React + Nginx    → http://localhost:3000
+#  TIER 2: backend   → Flask + Gunicorn → http://localhost:5000
+#  TIER 3: database  → PostgreSQL       → localhost:5432
+#
+#  Start:   docker-compose up --build
+#  Stop:    docker-compose down
+#  Wipe DB: docker-compose down -v
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+
+  # ── TIER 3: Database ─────────────────────────────────────────────
+  database:
+    image: postgres:15-alpine
+    container_name: task-manager-db
+    environment:
+      POSTGRES_DB:       taskdb
+      POSTGRES_USER:     taskuser
+      POSTGRES_PASSWORD: localpassword
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskuser -d taskdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── TIER 2: Backend ──────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: task-manager-backend
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      ENV:         development
+      APP_VERSION: "1.0.0-local"
+      DB_HOST:     database
+      DB_PORT:     "5432"
+      DB_NAME:     taskdb
+      DB_USER:     taskuser
+      DB_PASSWORD: localpassword
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app    # hot reload in development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # ── TIER 1: Frontend ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: task-manager-frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+    name: task-manager-network
+
+volumes:
+  postgres_data:
+    name: task-manager-postgres-data

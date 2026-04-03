@@ -1,0 +1,291 @@
+// ═══════════════════════════════════════════════════════════════════
+//  CI PIPELINE — App Repo
+//
+//  Triggered by: GitHub webhook on every push to main branch
+//
+//  HOW ECR URL IS SOLVED:
+//  ─────────────────────
+//  Problem: ECR URL is created by infra pipeline but CI needs it
+//           before we can push images.
+//
+//  Solution: ECR URL format is ALWAYS predictable:
+//    ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPO_NAME
+//
+//  The pipeline asks AWS "what is my account ID?" using:
+//    aws sts get-caller-identity
+//  Then constructs the URL at runtime.
+//  No credentials or files needed from infra pipeline.
+//
+//  Stages:
+//    1. Checkout
+//    2. Load Config     → get account ID, build ECR URL dynamically
+//    3. Test Backend    → pytest + flake8
+//    4. Test Frontend   → npm test
+//    5. Build Images    → docker build backend + frontend
+//    6. Push to ECR     → docker push both images
+//    7. Trigger Deploy  → trigger deploy pipeline with image tag
+// ═══════════════════════════════════════════════════════════════════
+
+pipeline {
+
+    agent any
+
+    triggers {
+        // Fires automatically when GitHub sends a push webhook
+        githubPush()
+    }
+
+    environment {
+        AWS_REGION   = 'us-east-1'
+        PROJECT_NAME = 'devops-platform'
+
+        // Image tag = first 7 characters of git commit SHA
+        // Example: if commit is abc1234def567, tag = abc1234
+        // This makes every image traceable to exact commit
+        IMAGE_TAG = "${GIT_COMMIT[0..6]}"
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        ansiColor('xterm')
+        // CI allows concurrent builds — two devs can push at same time
+    }
+
+    stages {
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 1 — Checkout
+        // ─────────────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh """
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "  CI Pipeline — Build #${BUILD_NUMBER}"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                    echo "  Branch : \$GIT_BRANCH"
+                    echo "  Commit : \$GIT_COMMIT"
+                    echo "  Tag    : ${IMAGE_TAG}"
+                    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+                """
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 2 — Load Config
+        //
+        // This is the KEY stage that solves the ECR URL problem.
+        //
+        // What happens:
+        //   1. Ask AWS for the account ID using IAM credentials
+        //   2. Build the ECR URL from that account ID
+        //   3. Store in env variables for all later stages to use
+        //
+        // Why this works without infra pipeline files:
+        //   ECR URL = ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/REPO_NAME
+        //   Account ID never changes
+        //   Region is defined by you
+        //   Repo name is defined by you in Terraform
+        //   So we can ALWAYS calculate the URL ourselves
+        // ─────────────────────────────────────────────────────────
+        stage('Load Config') {
+            steps {
+                script {
+                    echo "--- Getting AWS Account ID ---"
+
+                    // Ask AWS who we are — returns the account ID
+                    env.AWS_ACCOUNT_ID = sh(
+                        script: 'aws sts get-caller-identity --query Account --output text',
+                        returnStdout: true
+                    ).trim()
+
+                    // Build ECR URLs — same format every time
+                    // These repos were created by the infra pipeline in Terraform
+                    env.ECR_BACKEND_URL  = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.PROJECT_NAME}-backend"
+                    env.ECR_FRONTEND_URL = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com/${env.PROJECT_NAME}-frontend"
+
+                    // EKS cluster name — matches what you named it in Terraform variables
+                    env.EKS_CLUSTER_NAME = "${env.PROJECT_NAME}-production"
+
+                    echo "✅ Config loaded"
+                    echo "   Account ID   : ${env.AWS_ACCOUNT_ID}"
+                    echo "   ECR Backend  : ${env.ECR_BACKEND_URL}"
+                    echo "   ECR Frontend : ${env.ECR_FRONTEND_URL}"
+                    echo "   Image Tag    : ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 3 — Test Backend
+        //
+        // Runs two checks:
+        //   flake8 → code style and formatting
+        //   pytest → unit tests
+        //
+        // If either fails → pipeline stops → nothing is built or pushed
+        // ─────────────────────────────────────────────────────────
+        stage('Test Backend') {
+            steps {
+                dir('backend') {
+                    sh """
+                        echo "--- Setting up Python env ---"
+                        python3 -m venv venv
+                        . venv/bin/activate
+
+                        pip install -r requirements.txt --quiet
+
+                        echo "--- Linting (flake8) ---"
+                        flake8 . \
+                            --max-line-length=100 \
+                            --exclude=venv,__pycache__
+
+                        echo "--- Tests (pytest) ---"
+                        pytest test_app.py \
+                            -v \
+                            --tb=short \
+                            --junit-xml=test-results.xml
+
+                        echo "✅ Backend tests passed"
+                    """
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true,
+                          testResults: 'backend/test-results.xml'
+                    sh 'rm -rf backend/venv'
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 4 — Test Frontend
+        // ─────────────────────────────────────────────────────────
+        stage('Test Frontend') {
+            steps {
+                dir('frontend') {
+                    sh """
+                        npm ci --silent
+                        CI=true npm test -- --watchAll=false --passWithNoTests
+                        echo "✅ Frontend tests passed"
+                    """
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 5 — Build Docker Images
+        //
+        // Builds backend and frontend using their Dockerfiles
+        // Tags each image with:
+        //   :abc1234 → specific version (git SHA)
+        //   :latest  → always the newest
+        // ─────────────────────────────────────────────────────────
+        stage('Build Docker Images') {
+            steps {
+                sh """
+                    echo "--- Building backend image ---"
+                    docker build \
+                        --tag  ${env.ECR_BACKEND_URL}:${IMAGE_TAG} \
+                        --tag  ${env.ECR_BACKEND_URL}:latest \
+                        --label "git-commit=\$GIT_COMMIT" \
+                        --label "build-number=${BUILD_NUMBER}" \
+                        --file backend/Dockerfile \
+                        ./backend
+
+                    echo "--- Building frontend image ---"
+                    docker build \
+                        --tag  ${env.ECR_FRONTEND_URL}:${IMAGE_TAG} \
+                        --tag  ${env.ECR_FRONTEND_URL}:latest \
+                        --label "git-commit=\$GIT_COMMIT" \
+                        --label "build-number=${BUILD_NUMBER}" \
+                        --file frontend/Dockerfile \
+                        ./frontend
+
+                    echo "✅ Images built"
+                    docker images | grep ${PROJECT_NAME}
+                """
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 6 — Push to ECR
+        //
+        // Step 1: Login to ECR using IAM credentials (no password)
+        // Step 2: Push both images with both tags
+        //
+        // The ECR URL was built in Stage 2 from account ID
+        // ─────────────────────────────────────────────────────────
+        stage('Push to ECR') {
+            steps {
+                sh """
+                    echo "--- Login to ECR ---"
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin ${env.ECR_BACKEND_URL}
+
+                    echo "--- Push backend ---"
+                    docker push ${env.ECR_BACKEND_URL}:${IMAGE_TAG}
+                    docker push ${env.ECR_BACKEND_URL}:latest
+
+                    echo "--- Push frontend ---"
+                    docker push ${env.ECR_FRONTEND_URL}:${IMAGE_TAG}
+                    docker push ${env.ECR_FRONTEND_URL}:latest
+
+                    echo "✅ Images pushed to ECR"
+                    echo "   Backend  : ${env.ECR_BACKEND_URL}:${IMAGE_TAG}"
+                    echo "   Frontend : ${env.ECR_FRONTEND_URL}:${IMAGE_TAG}"
+                """
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────
+        // STAGE 7 — Trigger Deploy Pipeline
+        //
+        // Saves image tag to file and triggers the deploy pipeline
+        // The deploy pipeline receives the exact image tag to deploy
+        // ─────────────────────────────────────────────────────────
+        stage('Trigger Deploy') {
+            steps {
+                // Save tag to file — useful for manual reference
+                sh "echo ${IMAGE_TAG} > image-tag.txt"
+                archiveArtifacts artifacts: 'image-tag.txt',
+                                 fingerprint: true
+
+                // Trigger deploy pipeline with all needed info
+                build job: 'devops-platform-deploy',
+                      wait: false,
+                      parameters: [
+                          string(name: 'IMAGE_TAG',    value: IMAGE_TAG),
+                          string(name: 'GIT_COMMIT',   value: env.GIT_COMMIT),
+                          string(name: 'GIT_BRANCH',   value: env.GIT_BRANCH ?: 'main'),
+                          string(name: 'CI_BUILD_NUM', value: BUILD_NUMBER)
+                      ]
+
+                echo "✅ Deploy pipeline triggered with tag: ${IMAGE_TAG}"
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ CI SUCCESS — Build #${BUILD_NUMBER} — Tag: ${IMAGE_TAG} — Deploy triggered"
+        }
+        failure {
+            echo "❌ CI FAILED — Build #${BUILD_NUMBER} — Deploy NOT triggered"
+        }
+        always {
+            sh """
+                docker rmi ${env.ECR_BACKEND_URL}:${IMAGE_TAG}  2>/dev/null || true
+                docker rmi ${env.ECR_FRONTEND_URL}:${IMAGE_TAG} 2>/dev/null || true
+                docker rmi ${env.ECR_BACKEND_URL}:latest        2>/dev/null || true
+                docker rmi ${env.ECR_FRONTEND_URL}:latest       2>/dev/null || true
+            """
+            cleanWs()
+        }
+    }
+}
