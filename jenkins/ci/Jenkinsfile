@@ -128,27 +128,34 @@ pipeline {
         //
         // If either fails → pipeline stops → nothing is built or pushed
         // ─────────────────────────────────────────────────────────
-        stage('Test Backend') {
+ stage('Test Backend') {
+            agent {
+                docker {
+                    // Use official Python image — has python3, pip
+                    image 'python:3.11-slim'
+
+                    // IMPORTANT: reuse the parent workspace
+                    // Without this, the Docker container gets a different
+                    // workspace and cannot see the cloned code
+                    reuseNode true
+                }
+            }
             steps {
                 dir('backend') {
-                      agent {
-                        docker {
-                            image 'python:3.11'
-                                }
-                            }
                     sh """
-                        echo "--- Setting up Python env ---"
-                        python3 -m venv venv
-                        . venv/bin/activate
+                        echo "--- Python version ---"
+                        python3 --version
+                        pip --version
 
+                        echo "--- Installing dependencies ---"
                         pip install -r requirements.txt --quiet
 
                         echo "--- Linting (flake8) ---"
                         flake8 . \
                             --max-line-length=100 \
-                            --exclude=venv,__pycache__
+                            --exclude=__pycache__
 
-                        echo "--- Tests (pytest) ---"
+                        echo "--- Running tests (pytest) ---"
                         pytest test_app.py \
                             -v \
                             --tb=short \
@@ -162,7 +169,6 @@ pipeline {
                 always {
                     junit allowEmptyResults: true,
                           testResults: 'backend/test-results.xml'
-                    sh 'rm -rf backend/venv'
                 }
             }
         }
@@ -171,17 +177,33 @@ pipeline {
         // STAGE 4 — Test Frontend
         // ─────────────────────────────────────────────────────────
         stage('Test Frontend') {
+            agent {
+                docker {
+                    // Use official Node image — has npm, node
+                    image 'node:20-alpine'
+
+                    // Same workspace as parent — sees the cloned code
+                    reuseNode true
+                }
+            }
             steps {
                 dir('frontend') {
                     sh """
+                        echo "--- Node version ---"
+                        node --version
+                        npm --version
+
+                        echo "--- Installing packages ---"
                         npm ci --silent
+
+                        echo "--- Running tests ---"
                         CI=true npm test -- --watchAll=false --passWithNoTests
+
                         echo "✅ Frontend tests passed"
                     """
                 }
             }
         }
-
         // ─────────────────────────────────────────────────────────
         // STAGE 5 — Build Docker Images
         //
