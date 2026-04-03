@@ -131,6 +131,11 @@ pipeline {
         stage('Test Backend') {
             steps {
                 dir('backend') {
+                      agent {
+                        docker {
+                            image 'python:3.11'
+                                }
+                            }
                     sh """
                         echo "--- Setting up Python env ---"
                         python3 -m venv venv
