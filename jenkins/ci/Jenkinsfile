@@ -37,6 +37,7 @@ pipeline {
 
     environment {
         AWS_REGION   = 'us-east-1'
+        AWS_CREDS = credentials('aws-secret')
         PROJECT_NAME = 'devops-platform'
 
         // Image tag = first 7 characters of git commit SHA
