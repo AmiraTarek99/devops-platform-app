@@ -30,7 +30,7 @@ def test_info_returns_metadata(client):
 def test_ready_when_db_connected(client):
     with patch("app.get_db") as mock_db:
         mock_conn = MagicMock()
-        mock_cur  = MagicMock()
+        mock_cur = MagicMock()
         mock_db.return_value = mock_conn
         mock_conn.cursor.return_value = mock_cur
 
@@ -51,13 +51,19 @@ def test_ready_when_db_down(client):
 def test_get_tasks_returns_list(client):
     with patch("app.get_db") as mock_db:
         mock_conn = MagicMock()
-        mock_cur  = MagicMock()
+        mock_cur = MagicMock()
         mock_db.return_value = mock_conn
         mock_conn.cursor.return_value = mock_cur
         mock_cur.fetchall.return_value = [
-            {"id": 1, "title": "Test task", "status": "pending",
-             "priority": "high", "description": "", "created_at": "2024-01-01",
-             "updated_at": "2024-01-01"}
+            {
+                "id": 1,
+                "title": "Test task",
+                "status": "pending",
+                "priority": "high",
+                "description": "",
+                "created_at": "2024-01-01",
+                "updated_at": "2024-01-01",
+            }
         ]
 
         r = client.get("/api/tasks")
@@ -67,9 +73,11 @@ def test_get_tasks_returns_list(client):
 
 
 def test_create_task_missing_title(client):
-    r = client.post("/api/tasks",
-                    json={"description": "no title"},
-                    content_type="application/json")
+    r = client.post(
+        "/api/tasks",
+        json={"description": "no title"},
+        content_type="application/json"
+    )
     assert r.status_code == 400
     assert "error" in r.json
 
@@ -77,16 +85,21 @@ def test_create_task_missing_title(client):
 def test_create_task_success(client):
     with patch("app.get_db") as mock_db:
         mock_conn = MagicMock()
-        mock_cur  = MagicMock()
+        mock_cur = MagicMock()
         mock_db.return_value = mock_conn
         mock_conn.cursor.return_value = mock_cur
         mock_cur.fetchone.return_value = {
-            "id": 1, "title": "New task", "description": "",
-            "status": "pending", "priority": "medium",
-            "created_at": "2024-01-01"
+            "id": 1,
+            "title": "New task",
+            "description": "",
+            "status": "pending",
+            "priority": "medium",
+            "created_at": "2024-01-01",
         }
 
-        r = client.post("/api/tasks",
-                        json={"title": "New task"},
-                        content_type="application/json")
+        r = client.post(
+            "/api/tasks",
+            json={"title": "New task"},
+            content_type="application/json"
+        )
         assert r.status_code == 201
