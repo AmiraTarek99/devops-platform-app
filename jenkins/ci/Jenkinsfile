@@ -134,7 +134,7 @@ pipeline {
                     sh """
                         echo "--- Python version ---"
                         python3 --version
-                        pip --version
+                        pip3 --version
 
                         echo "--- Installing dependencies ---"
                         pip3 install -r requirements.txt --quiet
