@@ -137,7 +137,7 @@ pipeline {
                         pip --version
 
                         echo "--- Installing dependencies ---"
-                        pip install -r requirements.txt --quiet
+                        pip3 install -r requirements.txt --quiet
 
                         echo "--- Linting (flake8) ---"
                         flake8 . \
