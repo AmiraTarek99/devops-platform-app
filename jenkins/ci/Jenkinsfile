@@ -133,7 +133,7 @@ pipeline {
                 docker {
                     // Use official Python image — has python3, pip
                     image 'python:3.11-slim'
-
+                    args '-u root'
                     // IMPORTANT: reuse the parent workspace
                     // Without this, the Docker container gets a different
                     // workspace and cannot see the cloned code
@@ -181,6 +181,7 @@ pipeline {
                 docker {
                     // Use official Node image — has npm, node
                     image 'node:20-alpine'
+                    args '-u root'
 
                     // Same workspace as parent — sees the cloned code
                     reuseNode true
