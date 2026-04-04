@@ -129,16 +129,6 @@ pipeline {
         // If either fails → pipeline stops → nothing is built or pushed
         // ─────────────────────────────────────────────────────────
  stage('Test Backend') {
-            agent {
-                docker {
-                    // Use official Python image — has python3, pip
-                    image 'python:3.11-slim'
-                    // IMPORTANT: reuse the parent workspace
-                    // Without this, the Docker container gets a different
-                    // workspace and cannot see the cloned code
-                    reuseNode true
-                }
-            }
             steps {
                 dir('backend') {
                     sh """
@@ -176,15 +166,6 @@ pipeline {
         // STAGE 4 — Test Frontend
         // ─────────────────────────────────────────────────────────
         stage('Test Frontend') {
-            agent {
-                docker {
-                    // Use official Node image — has npm, node
-                    image 'node:20-alpine'
-
-                    // Same workspace as parent — sees the cloned code
-                    reuseNode true
-                }
-            }
             steps {
                 dir('frontend') {
                     sh """
