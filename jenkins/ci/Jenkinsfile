@@ -132,6 +132,11 @@ pipeline {
             steps {
                 dir('backend') {
                     sh """
+    export PATH=$PATH:/var/lib/jenkins/.local/bin
+
+    flake8 . --max-line-length=100 --exclude=__pycache__
+"""
+                    sh """
                         echo "--- Python version ---"
                         python3 --version
                         pip3 --version
