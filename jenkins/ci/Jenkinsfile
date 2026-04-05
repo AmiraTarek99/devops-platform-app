@@ -136,27 +136,23 @@ pipeline {
 
     flake8 . --max-line-length=100 --exclude=__pycache__
 """
-                    sh """
-                        echo "--- Python version ---"
-                        python3 --version
-                        pip3 --version
+        sh """
+    echo "--- Creating virtual environment ---"
+    python3.11 -m venv venv
 
-                        echo "--- Installing dependencies ---"
-                        pip3 install -r requirements.txt --quiet
+    echo "--- Activating venv ---"
+    . venv/bin/activate
 
-                        echo "--- Linting (flake8) ---"
-                        flake8 . \
-                            --max-line-length=100 \
-                            --exclude=__pycache__
+    echo "--- Installing dependencies ---"
+    pip install --upgrade pip
+    pip install -r requirements.txt
 
-                        echo "--- Running tests (pytest) ---"
-                        pytest test_app.py \
-                            -v \
-                            --tb=short \
-                            --junit-xml=test-results.xml
+    echo "--- Linting ---"
+    flake8 . --max-line-length=100 --exclude=__pycache__
 
-                        echo "✅ Backend tests passed"
-                    """
+    echo "--- Testing ---"
+    pytest test_app.py -v --junit-xml=test-results.xml
+"""
                 }
             }
             post {
