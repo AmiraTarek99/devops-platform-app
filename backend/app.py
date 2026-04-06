@@ -36,7 +36,15 @@ def health():
         "version": os.getenv("APP_VERSION", "1.0.0")
     }), 200
 
+@app.route("/api/health")
+def simple_health():
+    return {"status": "ok"}, 200
 
+@app.route("/")
+def home():
+    return {"message": "Backend is running"}
+
+    
 @app.route("/api/ready")
 def ready():
     """
